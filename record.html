@@ -1,0 +1,219 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>엄맹 - 음성 녹음</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bree+Serif&family=Noto+Serif+KR:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --cream: #fcf9f2; --beige: #ddd4b9; --teal: #027361; --teal-dark: #015347;
+    --teal-tint: #e5f0ec; --ink: #3a3226; --ink-soft: #6e6455; --card: #ffffff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; word-break: keep-all;
+    font-family: -apple-system, "Malgun Gothic", sans-serif;
+    background: var(--cream); color: var(--ink);
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; padding: 24px 16px;
+  }
+  #brandHeader { text-align: center; margin-bottom: 20px; }
+  #brandLogo { font-family: 'Bree Serif', serif; font-size: 28px; color: var(--teal); }
+  #brandSub { font-family: 'Noto Serif KR', serif; font-size: 13px; color: var(--ink-soft); margin-top: 4px; }
+  #box { width: 100%; max-width: 360px; background: var(--card); border-radius: 14px; padding: 20px; text-align: center; }
+  #box p { font-size: 14px; color: var(--ink); line-height: 1.6; margin: 0 0 16px; }
+  button {
+    display: block; width: 100%; padding: 13px; margin-top: 8px; font-size: 14px; font-weight: 700;
+    border-radius: 10px; border: none; cursor: pointer;
+  }
+  #recordToggleBtn { background: var(--teal-dark); color: #fff; }
+  #recordToggleBtn.recording { background: #c0392b; }
+  #recordToggleBtn:disabled { background: #e5e0d3; color: #a89f8c; cursor: not-allowed; }
+  #saveBtn { background: var(--teal-dark); color: #fff; }
+  #saveBtn:disabled { background: #e5e0d3; color: #a89f8c; cursor: not-allowed; }
+  #recordTimer { font-size: 22px; font-weight: 700; color: var(--ink); margin-top: 8px; font-variant-numeric: tabular-nums; }
+  audio { width: 100%; margin-top: 10px; }
+  #durationStatus, #status { font-size: 12px; color: var(--ink-soft); margin-top: 8px; min-height: 15px; }
+  #status.error { color: #c0392b; }
+  #status.success { color: var(--teal-dark); font-weight: 700; }
+</style>
+</head>
+<body>
+
+<div id="brandHeader">
+  <div id="brandLogo">UMmeng</div>
+  <div id="brandSub">엄맹 — 음성 녹음</div>
+</div>
+
+<div id="box">
+  <div id="errorBox" style="display:none;">
+    <p>⚠️ 잘못된 링크예요. 이전 화면으로 돌아가서 다시 시도해주세요.</p>
+  </div>
+
+  <div id="recordBox">
+    <p><span id="artworkLabel"></span>번 그림에 남길 목소리를<br>버튼을 눌러 녹음해주세요 (최대 2분)</p>
+    <button id="recordToggleBtn" type="button">🔴 녹음 시작</button>
+    <div id="recordTimer">0:00</div>
+    <audio id="previewPlayer" controls style="display:none;"></audio>
+    <div id="durationStatus"></div>
+    <button id="saveBtn" type="button" disabled>저장하기</button>
+    <div id="status"></div>
+  </div>
+</div>
+
+<script>
+// 2026-08-20: 구글이 Apps Script 웹앱을 감싸는 자체 sandboxFrame에서 마이크(microphone)
+// 권한을 허용목록에서 빼버려서(플랫폼 자체 정책 변경, 우리 코드로 못 고침), 그
+// iframe 안(VoiceSelect.html)에서는 getUserMedia가 항상 실패함. 대신 이 페이지는
+// Apps Script가 아니라 GitHub Pages에서 완전히 독립된 새 창(팝업)으로 열리기 때문에
+// 구글의 iframe 제약을 안 받고 마이크 접근이 정상 동작함 — VoiceSelect.html의
+// "지금 바로 녹음하기" 버튼이 이 페이지를 window.open()으로 띄운다.
+const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbxBFoU5wEQ3O0f1nzw1BulVz7Xby5rYqbUC1WZbQQPK30exJ91JLoqK6PeMqiCJc6LKvw/exec';
+const MAX_VOICE_SEC = 120;
+
+const params = new URLSearchParams(location.search);
+const ORDER_ID = params.get('order') || '';
+const ARTWORK_INDEX = params.get('artwork') || '';
+
+const errorBox = document.getElementById('errorBox');
+const recordBox = document.getElementById('recordBox');
+const artworkLabel = document.getElementById('artworkLabel');
+const recordToggleBtn = document.getElementById('recordToggleBtn');
+const recordTimer = document.getElementById('recordTimer');
+const previewPlayer = document.getElementById('previewPlayer');
+const durationStatus = document.getElementById('durationStatus');
+const saveBtn = document.getElementById('saveBtn');
+const statusEl = document.getElementById('status');
+
+if (!ORDER_ID || !ARTWORK_INDEX) {
+  errorBox.style.display = 'block';
+  recordBox.style.display = 'none';
+} else {
+  artworkLabel.textContent = ARTWORK_INDEX;
+}
+
+let mediaRecorder = null, micStream = null, recordedChunks = [], recordedBlob = null;
+let recordTimerInterval = null, recordSeconds = 0;
+
+function formatDur(sec) {
+  const m = Math.floor(sec / 60);
+  const s = Math.round(sec % 60);
+  return `${m}:${String(s).padStart(2, '0')}`;
+}
+
+function pickMimeType() {
+  const candidates = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'];
+  for (const c of candidates) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(c)) return c;
+  }
+  return '';
+}
+
+function stopMicStream() {
+  if (micStream) { micStream.getTracks().forEach(t => t.stop()); micStream = null; }
+}
+
+async function startRecording() {
+  recordedBlob = null;
+  statusEl.textContent = '';
+  statusEl.className = '';
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    statusEl.textContent = '⚠️ 마이크를 사용할 수 없어요 — 브라우저 권한을 확인해주세요.';
+    statusEl.className = 'error';
+    return;
+  }
+  const mimeType = pickMimeType();
+  recordedChunks = [];
+  mediaRecorder = new MediaRecorder(micStream, mimeType ? { mimeType } : undefined);
+  mediaRecorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunks.push(e.data); };
+  mediaRecorder.onstop = () => {
+    stopMicStream();
+    recordedBlob = new Blob(recordedChunks, { type: mediaRecorder.mimeType || 'audio/webm' });
+    previewPlayer.src = URL.createObjectURL(recordedBlob);
+    previewPlayer.style.display = 'block';
+    saveBtn.disabled = false;
+    durationStatus.textContent = `녹음 완료 (${formatDur(recordSeconds)}) — 먼저 재생해서 확인해보세요.`;
+  };
+  mediaRecorder.start();
+  recordSeconds = 0;
+  recordTimer.textContent = '0:00';
+  recordToggleBtn.textContent = '⏹ 녹음 정지';
+  recordToggleBtn.classList.add('recording');
+  previewPlayer.style.display = 'none';
+  durationStatus.textContent = '';
+  saveBtn.disabled = true;
+  recordTimerInterval = setInterval(() => {
+    recordSeconds++;
+    recordTimer.textContent = formatDur(recordSeconds);
+    if (recordSeconds >= MAX_VOICE_SEC) stopRecording();
+  }, 1000);
+}
+
+function stopRecording() {
+  clearInterval(recordTimerInterval);
+  recordToggleBtn.textContent = '🔴 녹음 시작';
+  recordToggleBtn.classList.remove('recording');
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+}
+
+recordToggleBtn.addEventListener('click', () => {
+  if (mediaRecorder && mediaRecorder.state === 'recording') stopRecording();
+  else startRecording();
+});
+
+function extFromMime(mime) {
+  if (mime.includes('mp4')) return 'm4a';
+  if (mime.includes('ogg')) return 'ogg';
+  return 'webm';
+}
+
+saveBtn.addEventListener('click', () => {
+  if (!recordedBlob) {
+    statusEl.textContent = '⚠️ 먼저 녹음해주세요.';
+    statusEl.className = 'error';
+    return;
+  }
+  saveBtn.disabled = true;
+  recordToggleBtn.disabled = true;
+  statusEl.textContent = '저장 중...';
+  statusEl.className = '';
+  const filename = `recording.${extFromMime(recordedBlob.type)}`;
+  const reader = new FileReader();
+  reader.onload = async (ev) => {
+    try {
+      const res = await fetch(SCRIPT_URL, {
+        method: 'POST',
+        body: JSON.stringify({
+          type: 'voice',
+          order: ORDER_ID,
+          artwork: ARTWORK_INDEX,
+          filename: filename,
+          voiceDataUrl: ev.target.result,
+        }),
+      });
+      const json = await res.json();
+      if (!json.ok) throw new Error(json.error || '서버 오류');
+      statusEl.textContent = '✅ 저장 완료! 이 창을 닫고 원래 화면으로 돌아가주세요.';
+      statusEl.className = 'success';
+      recordToggleBtn.style.display = 'none';
+      saveBtn.style.display = 'none';
+      if (window.opener) {
+        try { window.opener.postMessage({ type: 'ummeng-voice-saved', artwork: ARTWORK_INDEX }, '*'); } catch (e) {}
+      }
+    } catch (err) {
+      statusEl.textContent = '❌ 저장 실패: ' + err.message;
+      statusEl.className = 'error';
+      saveBtn.disabled = false;
+      recordToggleBtn.disabled = false;
+    }
+  };
+  reader.readAsDataURL(recordedBlob);
+});
+</script>
+</body>
+</html>
